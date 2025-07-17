@@ -1,5 +1,7 @@
 const mysql = require('mysql2');
 const dotenv = require('dotenv');
+const redis = require('redis');
+
 let instance = null;
 dotenv.config();
 
@@ -18,14 +20,34 @@ connection.connect((err) => {
      console.log('db ' + connection.state);
 });
 
+const redisClient = redis.createClient({
+    socket: {
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: process.env.REDIS_PORT || 6379
+    }
+});
+
+redisClient.connect().catch(console.error);
+
 
 class DbService {
     static getDbServiceInstance() {
         return instance ? instance : new DbService();
     }
 
+    cacheKey = 'users:all';
+
     async getAllData() {
         try {
+            const cacheResults = await redisClient.get(this.cacheKey);
+
+            if(cacheResults){
+                console.log('Received data from cache')
+                return JSON.parse(cacheResults);
+            }
+
+            console.log("data didn't received from redis");
+
             const response = await new Promise((resolve, reject) => {
                 const query = "SELECT * FROM users;";
 
@@ -35,6 +57,9 @@ class DbService {
                 })
             });
             // console.log(response);
+
+            await redisClient.SETEX(this.cacheKey,3600,JSON.stringify(response));
+
             return response;
         } catch (error) {
             console.log(error);
@@ -53,6 +78,9 @@ class DbService {
                     resolve(result.insertId);
                 })
             });
+
+            await redisClient.del(this.cacheKey);
+
             return {
                 id : insertId,
                 name : name,
@@ -74,6 +102,8 @@ class DbService {
                     resolve(result.affectedRows);
                 })
             });
+
+            await redisClient.del(this.cacheKey);
     
             return response === 1 ? true : false;
         } catch (error) {
@@ -93,6 +123,8 @@ class DbService {
                     resolve(result.affectedRows);
                 })
             });
+
+            await redisClient.del(this.cacheKey);
     
             return response === 1 ? true : false;
         } catch (error) {
