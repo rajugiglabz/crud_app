@@ -1,6 +1,8 @@
 const mysql = require('mysql2');
 const dotenv = require('dotenv');
 const redis = require('redis');
+const { v4: uuidv4 } = require('uuid');
+const cron = require('node-cron');
 
 let instance = null;
 dotenv.config();
@@ -37,6 +39,7 @@ class DbService {
 
     cacheKey = 'users:all';
 
+
     async getAllData() {
         try {
             const cacheResults = await redisClient.get(this.cacheKey);
@@ -70,22 +73,25 @@ class DbService {
     async insertNewName(name) {
         try {
             const dateAdded = new Date();
-            const insertId = await new Promise((resolve, reject) => {
-                const query = "INSERT INTO users (name, date_added) VALUES (?,?);";
 
-                connection.query(query, [name, dateAdded] , (err, result) => {
-                    if (err) reject(new Error(err.message));
-                    resolve(result.insertId);
-                })
-            });
+            const newUser = {
+                uuid : uuidv4(),
+                name,
+                date_added : dateAdded
+            }
+            //const insertId = await new Promise((resolve, reject) => {
+             //   const query = "INSERT INTO users (name, date_added) VALUES (?,?);";
 
-            await redisClient.del(this.cacheKey);
+                await redisClient.rPush('users:pending',JSON.stringify(newUser))
+                //connection.query(query, [name, dateAdded] , (err, result) => {
+                  //  if (err) reject(new Error(err.message));
+                   // resolve(result.insertId);
+                //})
+            //});
 
-            return {
-                id : insertId,
-                name : name,
-                dateAdded : dateAdded
-            };
+            //await redisClient.del(this.cacheKey);
+
+            return newUser;
         } catch (error) {
             console.log(error);
         }
@@ -148,6 +154,50 @@ class DbService {
         } catch (error) {
             console.log(error);
         }
+    }
+}
+
+cron.schedule( "* * * * *",
+  async () => {
+    await writeCrudDataToDBFromRedis();
+  }
+);
+
+async function writeCrudDataToDBFromRedis() {
+    try {
+        const length = await redisClient.lLen('users:pending');
+        if (length === 0) return;
+
+        const userStrings = await redisClient.lRange('users:pending', 0, length - 1);
+        const users = [];
+
+        for(const str of userStrings){
+            const user = JSON.parse(str);
+            users.push(user);
+        }
+
+        const values = [];
+        for(const user of users){
+            values.push([user.name,new Date(user.date_added)])
+        }
+
+        const query = "INSERT INTO users (name, date_added) VALUES ?";
+        
+        await new Promise((resolve, reject) => {
+            connection.query(query, [values], (err, result) => {
+                if (err) reject(err);
+                resolve(result);
+            });
+        });
+
+    
+        await redisClient.lTrim('users:pending', length, -1);
+
+        await redisClient.del('users:pending');
+
+        console.log(`Flushed ${users.length} users to DB`);
+    } catch (error) {
+        console.error("Error during flush:", error);
     }
 }
 
